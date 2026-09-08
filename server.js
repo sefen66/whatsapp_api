@@ -33,17 +33,42 @@ let statusText = 'starting'; // starting | qr | authenticated | ready | disconne
 
 const client = new Client({
     authStrategy: new LocalAuth({ dataPath: '/data/wwebjs_auth' }),
+    // بنزوّد المهلة اللي بيستنّاها Puppeteer قبل ما يعتبر إن الأمر فشل.
+    // القيمة الافتراضية (180 ثانية) أحيانًا مش كفاية لو السيرفر شغال على موارد قليلة.
     puppeteer: {
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        protocolTimeout: 300000, // 5 دقايق بدل الافتراضي
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--single-process',   // بيقلل استهلاك الرام كتير على سيرفرات الاستضافة المجانية
+            '--no-zygote'
         ]
     }
 });
+
+// عداد بسيط لعدد مرات الفشل المتتالية في الإرسال
+let consecutiveSendFailures = 0;
+
+// دالة بتعيد تشغيل عميل واتساب من الصفر لو الجلسة اتجمدت
+async function restartClient(reason) {
+    console.log(`جاري إعادة تشغيل الاتصال بواتساب بسبب: ${reason}`);
+    try {
+        await client.destroy();
+    } catch (err) {
+        console.error('خطأ أثناء إغلاق العميل القديم:', err.message);
+    }
+    isReady = false;
+    statusText = 'restarting';
+    latestQr = null;
+    consecutiveSendFailures = 0;
+    client.initialize();
+}
 
 client.on('qr', async (qr) => {
     statusText = 'qr';
@@ -117,11 +142,33 @@ app.post('/send-message', checkApiKey, async (req, res) => {
         }
         const chatId = `${String(phone).replace(/[^0-9]/g, '')}@c.us`;
         await client.sendMessage(chatId, message);
+        consecutiveSendFailures = 0;
         res.json({ success: true });
     } catch (error) {
         console.error('Error sending message:', error);
-        res.status(500).json({ error: error.message });
+
+        // لو الخطأ نوعه "تايم آوت" فده علامة إن Chromium اتجمد جوه —
+        // بعد 3 فشلات متتالية بنعمل إعادة تشغيل تلقائية للعميل
+        const isTimeout = /timed out|timeout/i.test(error.message || '');
+        if (isTimeout) {
+            consecutiveSendFailures += 1;
+            if (consecutiveSendFailures >= 3) {
+                restartClient('تكرار خطأ التايم آوت في الإرسال');
+            }
+        }
+
+        res.status(500).json({
+            error: isTimeout
+                ? 'حصل تأخير في الاتصال بواتساب، جاري إعادة المحاولة تلقائيًا. حاولي تاني بعد شوية.'
+                : error.message
+        });
     }
+});
+
+// نقطة يدوية لإعادة تشغيل الاتصال لو الحالة عالقة (مفيدة للتشخيص)
+app.post('/restart', checkApiKey, async (req, res) => {
+    await restartClient('طلب يدوي');
+    res.json({ success: true, message: 'جاري إعادة التشغيل...' });
 });
 
 app.get('/', (req, res) => {
