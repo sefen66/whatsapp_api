@@ -1,9 +1,11 @@
 # استخدام Node مع تثبيت Chromium اللازم لـ whatsapp-web.js (Puppeteer)
 FROM node:18-slim
 
-# تثبيت Chromium والمكتبات المطلوبة لتشغيله
+# مكتبات النظام اللازمة عشان Chromium (اللي هيحمّله Puppeteer نفسه) يشتغل
+# ملحوظة: مبنثبتش حزمة chromium بتاعة Debian عن قصد — نسختها ممكن متطابقتش
+# مع بروتوكول CDP اللي Puppeteer متبني عليه، وده بيسبب أخطاء تايم آوت غريبة
+# زي "Runtime.callFunctionOn timed out" وقت الإرسال.
 RUN apt-get update && apt-get install -y \
-    chromium \
     fonts-liberation \
     libappindicator3-1 \
     libasound2 \
@@ -23,13 +25,11 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# إخبار Puppeteer باستخدام Chromium المثبت بدلاً من تنزيل نسخة جديدة
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-
 WORKDIR /app
 
 COPY package*.json ./
+# مفيش PUPPETEER_SKIP_CHROMIUM_DOWNLOAD هنا، فـ npm install هيحمّل نسخة
+# Chromium المتطابقة تمامًا مع نسخة Puppeteer المستخدمة في whatsapp-web.js
 RUN npm install --omit=dev
 
 COPY . .
