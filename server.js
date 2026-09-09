@@ -6,6 +6,7 @@
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
+const webpush = require('web-push');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const app = express();
@@ -22,6 +23,22 @@ function checkApiKey(req, res, next) {
         return res.status(401).json({ error: 'مفتاح API غير صحيح' });
     }
     next();
+}
+
+// ------------------------------------------------------------
+// إعداد إشعارات Push الحقيقية (Web Push + VAPID)
+// ------------------------------------------------------------
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(
+        'mailto:no-reply@sally-platform.local',
+        VAPID_PUBLIC_KEY,
+        VAPID_PRIVATE_KEY
+    );
+} else {
+    console.warn('تنبيه: مفاتيح VAPID غير مُعرّفة، خاصية Push لن تعمل حتى تضيفيها في Variables');
 }
 
 // ------------------------------------------------------------
@@ -173,6 +190,41 @@ app.post('/restart', checkApiKey, async (req, res) => {
 
 app.get('/', (req, res) => {
     res.send('Sally WhatsApp Bridge is running ✅');
+});
+
+// ------------------------------------------------------------
+// إشعارات Push الحقيقية (تعمل حتى لو الموقع مقفول تمامًا)
+// ------------------------------------------------------------
+
+// إرجاع المفتاح العام حتى يقدر المتصفح يعمل اشتراك Push
+app.get('/vapid-public-key', checkApiKey, (req, res) => {
+    if (!VAPID_PUBLIC_KEY) {
+        return res.status(500).json({ error: 'مفاتيح VAPID غير مُعرّفة على السيرفر' });
+    }
+    res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+// إرسال إشعار Push فعلي لاشتراك معيّن
+// body: { subscription: {...}, title: "...", body: "..." }
+app.post('/send-push', checkApiKey, async (req, res) => {
+    try {
+        if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+            return res.status(500).json({ error: 'مفاتيح VAPID غير مُعرّفة على السيرفر' });
+        }
+        const { subscription, title, body } = req.body;
+        if (!subscription || !subscription.endpoint) {
+            return res.status(400).json({ error: 'بيانات الاشتراك (subscription) غير صحيحة' });
+        }
+        await webpush.sendNotification(
+            subscription,
+            JSON.stringify({ title: title || 'إشعار جديد', body: body || '' })
+        );
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error sending push notification:', error);
+        // كود 410 يعني الاشتراك بايظ/منتهي، مفيد للفرونت إند حتى يمسحه
+        res.status(error.statusCode || 500).json({ error: error.message });
+    }
 });
 
 const PORT = process.env.PORT || 3000;
