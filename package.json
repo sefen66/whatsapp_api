@@ -10,6 +10,7 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "qrcode": "^1.5.3",
+    "web-push": "^3.6.7",
     "whatsapp-web.js": "^1.26.0"
   },
   "engines": {
