@@ -53,8 +53,7 @@ const client = new Client({
     // بنزوّد المهلة اللي بيستنّاها Puppeteer قبل ما يعتبر إن الأمر فشل.
     // القيمة الافتراضية (180 ثانية) أحيانًا مش كفاية لو السيرفر شغال على موارد قليلة.
     puppeteer: {
-        headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        headless: true,executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
         protocolTimeout: 300000, // 5 دقايق بدل الافتراضي
         args: [
             '--no-sandbox',
@@ -63,7 +62,7 @@ const client = new Client({
             '--disable-gpu',
             '--disable-software-rasterizer',
             '--disable-extensions',
-            '--single-process',   // بيقلل استهلاك الرام كتير على سيرفرات الاستضافة المجانية
+           // بيقلل استهلاك الرام كتير على سيرفرات الاستضافة المجانية
             '--no-zygote'
         ]
     }
