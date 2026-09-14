@@ -1,6 +1,6 @@
 // ============================================================
 // سيرفر وسيط بين منصة Mrs Sally التعليمية وواتساب
-// يعتمد على مكتبة whatsapp-web.js (تشغّل واتساب ويب حقيقي عن طريق متصفح مخفي)
+// يعتمد على مكتبة whatsapp-web.js
 // ============================================================
 
 const express = require('express');
@@ -13,7 +13,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ------------------------------------------------------------
 // مفتاح أمان اختياري
+// ------------------------------------------------------------
 const API_KEY = process.env.API_KEY || '';
 function checkApiKey(req, res, next) {
     if (!API_KEY) return next();
@@ -45,191 +47,257 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 // ------------------------------------------------------------
 let latestQr = null;
 let isReady = false;
-let statusText = 'starting'; // starting | qr | authenticated | ready | disconnected | restarting | auth_failure
+let statusText = 'starting';
 let consecutiveSendFailures = 0;
 
-// العميل الحالي + مؤقتات ومؤشرات حماية
 let client = null;
 let authTimeout = null;
 let isCreating = false;
+let recreateTimer = null;
+
+const AUTH_PATH = process.env.WWEBJS_AUTH_PATH || '/tmp/wwebjs_auth';
+
+// ------------------------------------------------------------
+// أداة مساعدة: تجاهل الأخطاء المزعجة وقت الإغلاق
+// ------------------------------------------------------------
+function isHarmlessError(err) {
+    const msg = (err && err.message) ? err.message : String(err || '');
+    return (
+        msg.includes('Target closed') ||
+        msg.includes('Session closed') ||
+        msg.includes('Protocol error') ||
+        msg.includes('Execution context was destroyed')
+    );
+}
+
+// ------------------------------------------------------------
+// جدولة إنشاء عميل جديد (بدل setTimeout مبعثر)
+// ------------------------------------------------------------
+function scheduleRecreate(delayMs, reason) {
+    if (recreateTimer) {
+        clearTimeout(recreateTimer);
+    }
+    console.log(`⏱️ جدولة إعادة إنشاء العميل بعد ${delayMs}ms (${reason})`);
+    recreateTimer = setTimeout(() => {
+        recreateTimer = null;
+        createClient(reason);
+    }, delayMs);
+}
 
 // ------------------------------------------------------------
 // إنشاء عميل واتساب جديد من الصفر
 // ------------------------------------------------------------
-function createClient() {
-    // حماية ضد التنفيذ المتوازي
+function createClient(reason = 'unknown') {
     if (isCreating) {
         console.log('createClient: محاولة إنشاء أثناء إنشاء آخر، تجاهل.');
         return;
     }
     isCreating = true;
+    console.log(`🔄 إنشاء عميل واتساب جديد (السبب: ${reason})`);
 
-    // تنظيف العميل القديم
+    // تنظيف مؤقت التوثيق
+    if (authTimeout) {
+        clearTimeout(authTimeout);
+        authTimeout = null;
+    }
+
     const oldClient = client;
     client = null;
 
     const proceed = () => {
-        console.log('إنشاء عميل واتساب جديد...');
-        client = new Client({
-            authStrategy: new LocalAuth({ dataPath: '/tmp/wwebjs_auth' }),
-            puppeteer: {
-                headless: true,
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-                protocolTimeout: 300000,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions'
-                    // '--single-process' // لو الرام ضيقة جدًا، جرّبي تفعيلها (بس ممكن تكسر الإرسال)
-                ]
-            }
-        });
+        let newClient;
+        try {
+            newClient = new Client({
+                authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
+                puppeteer: {
+                    headless: true,
+                    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+                    protocolTimeout: 300000,
+                    args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                        '--disable-software-rasterizer',
+                        '--disable-extensions'
+                    ]
+                }
+            });
+        } catch (err) {
+            console.error('❌ فشل إنشاء Client:', err.message);
+            isCreating = false;
+            scheduleRecreate(5000, 'فشل إنشاء Client');
+            return;
+        }
+
+        client = newClient;
 
         // QR جديد
-        client.on('qr', async (qr) => {
+        newClient.on('qr', async (qr) => {
             statusText = 'qr';
             isReady = false;
             try {
                 latestQr = await QRCode.toDataURL(qr);
-                console.log('QR جديد جاهز ✅');
+                console.log('✅ QR جديد جاهز — افتحي /qr وامسحيه بسرعة');
             } catch (err) {
-                console.error('فشل تحويل QR لصورة:', err.message);
+                console.error('❌ فشل تحويل QR لصورة:', err.message);
             }
         });
 
-        // تم التوثيق — نستنى "ready" خلال 30 ثانية وإلا الجلسة تالفة
-        client.on('authenticated', () => {
+        // تم التوثيق — نستنى "ready" خلال 60 ثانية وإلا الجلسة تالفة
+        newClient.on('authenticated', () => {
             statusText = 'authenticated';
             isReady = false;
-            console.log('تم التوثيق، جاري التجهيز...');
-            clearTimeout(authTimeout);
+            console.log('🔐 تم التوثيق، جاري التجهيز...');
+            if (authTimeout) clearTimeout(authTimeout);
             authTimeout = setTimeout(() => {
+                authTimeout = null;
                 console.warn('⚠️ الجلسة قديمة/تالفة (ready مجاش)، إعادة إنشاء العميل...');
-                createClient();
-            }, 30000);
+                createClient('auth timeout');
+            }, 60000);
         });
 
         // جاهز للإرسال
-        client.on('ready', () => {
-            clearTimeout(authTimeout);
-            authTimeout = null;
+        newClient.on('ready', () => {
+            if (authTimeout) {
+                clearTimeout(authTimeout);
+                authTimeout = null;
+            }
             statusText = 'ready';
             isReady = true;
             latestQr = null;
             consecutiveSendFailures = 0;
-            console.log('واتساب متصل وجاهز للإرسال ✅');
+            isCreating = false; // ✅ العميل بقى جاهز فعلاً
+            console.log('✅ واتساب متصل وجاهز للإرسال');
         });
 
-        // انقطع الاتصال — ننشئ عميل جديد بعد 5 ثواني
-        client.on('disconnected', (reason) => {
-            clearTimeout(authTimeout);
-            authTimeout = null;
+        // انقطع الاتصال
+        newClient.on('disconnected', (reason) => {
+            if (authTimeout) {
+                clearTimeout(authTimeout);
+                authTimeout = null;
+            }
             statusText = 'disconnected';
             isReady = false;
             latestQr = null;
-            console.log('انقطع الاتصال بواتساب:', reason);
-            setTimeout(() => createClient(), 5000);
+            isCreating = false; // ✅ نسمح بإعادة الإنشاء
+            console.log('🔌 انقطع الاتصال بواتساب:', reason);
+            scheduleRecreate(5000, 'disconnected');
         });
 
-        // فشل التوثيق — ننشئ عميل جديد بعد 5 ثواني
-        client.on('auth_failure', (msg) => {
-            clearTimeout(authTimeout);
-            authTimeout = null;
+        // فشل التوثيق
+        newClient.on('auth_failure', (msg) => {
+            if (authTimeout) {
+                clearTimeout(authTimeout);
+                authTimeout = null;
+            }
             statusText = 'auth_failure';
             isReady = false;
             latestQr = null;
-            console.error('فشل التوثيق:', msg);
-            setTimeout(() => createClient(), 5000);
+            isCreating = false; // ✅
+            console.error('❌ فشل التوثيق:', msg);
+            scheduleRecreate(5000, 'auth_failure');
         });
 
-        // أي خطأ عام في العميل
-        client.on('error', (err) => {
-            console.error('خطأ في عميل واتساب:', err && err.message ? err.message : err);
+        // خطأ عام — نتجاهل المزعج وقت الإغلاق
+        newClient.on('error', (err) => {
+            if (isHarmlessError(err)) return;
+            console.error('⚠️ خطأ في عميل واتساب:', err && err.message ? err.message : err);
         });
 
-        // التهيئة الفعلية
-        client.initialize().catch((err) => {
-            console.error('فشل initialize:', err.message);
-            statusText = 'disconnected';
-            isReady = false;
-            setTimeout(() => createClient(), 5000);
-        });
-
-        isCreating = false;
+        // التهيئة
+        newClient.initialize()
+            .then(() => {
+                console.log('🚀 initialize() خلص');
+                // ملاحظة: مش بنصفّر isCreating هنا
+                // لأن ready / disconnected / auth_failure هما اللي بيصفّروها
+            })
+            .catch((err) => {
+                if (!isHarmlessError(err)) {
+                    console.error('❌ فشل initialize:', err.message);
+                }
+                statusText = 'disconnected';
+                isReady = false;
+                isCreating = false;
+                scheduleRecreate(5000, 'initialize failed');
+            });
     };
 
     if (oldClient) {
         try {
             oldClient.removeAllListeners();
         } catch (_) {}
+
         oldClient.destroy()
-            .catch((err) => console.error('خطأ أثناء destroy:', err.message))
+            .catch((err) => {
+                if (!isHarmlessError(err)) {
+                    console.error('خطأ أثناء destroy:', err.message);
+                }
+            })
             .finally(() => {
-                // نستنى شوي عشان الـ Puppeteer process يموت فعلاً قبل ما نطلع واحد جديد
-                setTimeout(proceed, 2000);
+                // نستنى 3 ثواني عشان الـ Puppeteer process يموت فعلاً
+                setTimeout(proceed, 3000);
             });
     } else {
         proceed();
     }
 }
 
+// ------------------------------------------------------------
 // إعادة تشغيل يدوية
+// ------------------------------------------------------------
 function restartClient(reason) {
-    console.log(`إعادة تشغيل الاتصال بواتساب بسبب: ${reason}`);
+    console.log(`♻️ إعادة تشغيل الاتصال بواتساب بسبب: ${reason}`);
     isReady = false;
     statusText = 'restarting';
     latestQr = null;
     consecutiveSendFailures = 0;
-    createClient();
+    // نلغي أي جدولة سابقة
+    if (recreateTimer) {
+        clearTimeout(recreateTimer);
+        recreateTimer = null;
+    }
+    // نصفّر isCreating عشان نقدر نعمل عميل جديد
+    isCreating = false;
+    createClient(reason);
 }
 
 // التشغيل الأول
-createClient();
+createClient('initial start');
 
 // ------------------------------------------------------------
 // المسارات (Endpoints)
 // ------------------------------------------------------------
 
-// حالة الاتصال الحالية
 app.get('/status', checkApiKey, (req, res) => {
     res.json({ connected: isReady, status: statusText });
 });
 
-// آخر QR كود متاح للمسح
 app.get('/qr', checkApiKey, (req, res) => {
     res.json({ qr: latestQr, status: statusText });
 });
 
-// تسجيل الخروج وإعادة توليد QR جديد
+// تسجيل الخروج
 app.post('/logout', checkApiKey, async (req, res) => {
     try {
         if (!client) {
-            // مفيش عميل شغال، ننشئ واحد جديد على طول
-            createClient();
+            createClient('logout بدون عميل');
             return res.json({ success: true, message: 'تم إنشاء عميل جديد' });
         }
         await client.logout();
-        // بعد logout، whatsapp-web.js بيطلق disconnected وبنتعامل معاه هناك.
-        // بس كضمان إضافي، نعمل createClient() بعد شوي لو لسه ما اتعملش.
-        setTimeout(() => {
-            if (!isCreating && (!client || !isReady)) {
-                createClient();
-            }
-        }, 3000);
+        // disconnected هيتعامل مع الباقي
         res.json({ success: true });
     } catch (error) {
-        console.error('خطأ في logout:', error.message);
-        // حتى لو فشل logout، نحاول نعمل عميل جديد
-        createClient();
+        if (!isHarmlessError(error)) {
+            console.error('خطأ في logout:', error.message);
+        }
+        // حتى لو فشل، نحاول نعمل عميل جديد
+        scheduleRecreate(3000, 'logout failed');
         res.status(500).json({ error: error.message });
     }
 });
 
-// إرسال رسالة واتساب فعلية
-// body: { phone: "201001234567", message: "نص الرسالة" }
+// إرسال رسالة
 app.post('/send-message', checkApiKey, async (req, res) => {
     try {
         if (!isReady || !client) {
@@ -262,7 +330,7 @@ app.post('/send-message', checkApiKey, async (req, res) => {
     }
 });
 
-// نقطة يدوية لإعادة تشغيل الاتصال
+// إعادة تشغيل يدوية
 app.post('/restart', checkApiKey, async (req, res) => {
     restartClient('طلب يدوي');
     res.json({ success: true, message: 'جاري إعادة التشغيل...' });
@@ -273,10 +341,9 @@ app.get('/', (req, res) => {
 });
 
 // ------------------------------------------------------------
-// إشعارات Push الحقيقية
+// إشعارات Push
 // ------------------------------------------------------------
 
-// إرجاع المفتاح العام
 app.get('/vapid-public-key', checkApiKey, (req, res) => {
     if (!VAPID_PUBLIC_KEY) {
         return res.status(500).json({ error: 'مفاتيح VAPID غير مُعرّفة على السيرفر' });
@@ -284,8 +351,6 @@ app.get('/vapid-public-key', checkApiKey, (req, res) => {
     res.json({ publicKey: VAPID_PUBLIC_KEY });
 });
 
-// إرسال إشعار Push فعلي
-// body: { subscription: {...}, title: "...", body: "..." }
 app.post('/send-push', checkApiKey, async (req, res) => {
     try {
         if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
@@ -311,14 +376,27 @@ app.post('/send-push', checkApiKey, async (req, res) => {
 // ------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`السيرفر شغال على البورت ${PORT}`);
+    console.log(`🌐 السيرفر شغال على البورت ${PORT}`);
+    console.log(`📁 مسار الجلسة: ${AUTH_PATH}`);
 });
 
-// تنظيف عند إغلاق العملية (مفيد لـ Railway)
+// تنظيف عند إغلاق العملية
 process.on('SIGTERM', async () => {
     console.log('SIGTERM: جاري الإغلاق...');
+    if (recreateTimer) clearTimeout(recreateTimer);
+    if (authTimeout) clearTimeout(authTimeout);
     try {
         if (client) await client.destroy();
     } catch (_) {}
     process.exit(0);
+});
+
+process.on('uncaughtException', (err) => {
+    if (isHarmlessError(err)) return;
+    console.error('💥 uncaughtException:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+    if (isHarmlessError(reason)) return;
+    console.error('💥 unhandledRejection:', reason && reason.message ? reason.message : reason);
 });
