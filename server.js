@@ -71,7 +71,7 @@ function createClient() {
     const proceed = () => {
         console.log('إنشاء عميل واتساب جديد...');
         client = new Client({
-            authStrategy: new LocalAuth({ dataPath: '/data/wwebjs_auth' }),
+            authStrategy: new LocalAuth({ dataPath: '/tmp/wwebjs_auth' }),
             puppeteer: {
                 headless: true,
                 executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
