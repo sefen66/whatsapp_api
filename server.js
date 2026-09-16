@@ -3,6 +3,10 @@
 // يعتمد على مكتبة whatsapp-web.js
 // ============================================================
 
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 const express = require('express');
 const cors = require('cors');
 const QRCode = require('qrcode');
@@ -12,6 +16,39 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ------------------------------------------------------------
+// دور تلقائيًا على متصفح Chrome/Edge موجود على الجهاز، بدل ما نعتمد
+// على تحميل نسخة منفصلة (اللي ممكن برنامج الحماية يحجزها)
+// ------------------------------------------------------------
+function findLocalBrowser() {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    const candidates = [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/microsoft-edge',
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+    return undefined; // مفيش متصفح اتلاقى، هيرجع للسلوك القديم (يدور بمفرده)
+}
+
+const LOCAL_BROWSER_PATH = findLocalBrowser();
+if (LOCAL_BROWSER_PATH) {
+    console.log(`🧭 هيتم استخدام المتصفح الموجود على الجهاز: ${LOCAL_BROWSER_PATH}`);
+} else {
+    console.log('🧭 مفيش Chrome/Edge اتلاقى في المسارات المعروفة، هيتم الاعتماد على النسخة اللي بيحملها Puppeteer لوحده');
+}
 
 // ------------------------------------------------------------
 // مفتاح أمان اختياري
@@ -55,7 +92,8 @@ let authTimeout = null;
 let isCreating = false;
 let recreateTimer = null;
 
-const AUTH_PATH = process.env.WWEBJS_AUTH_PATH || '/tmp/wwebjs_auth';
+// محليًا: نخزن الجلسة جنب السيرفر نفسه عشان متتمسحش بعد كل ريستارت للجهاز
+const AUTH_PATH = process.env.WWEBJS_AUTH_PATH || path.join(__dirname, 'wwebjs_auth');
 
 // ------------------------------------------------------------
 // أداة مساعدة: تجاهل الأخطاء المزعجة وقت الإغلاق
@@ -111,7 +149,10 @@ function createClient(reason = 'unknown') {
                 authStrategy: new LocalAuth({ dataPath: AUTH_PATH }),
                 puppeteer: {
                     headless: true,
-                    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+                    // على الجهاز المحلي مفيش /usr/bin/chromium زي Railway؛
+                    // سايبينها فاضية عشان Puppeteer يستخدم الـ Chromium اللي هو نازله لوحده
+                    // وقت npm install. لو عايزة تحددي كروم تاني حطي مساره في .env
+                    executablePath: LOCAL_BROWSER_PATH,
                     protocolTimeout: 300000,
                     args: [
                         '--no-sandbox',
@@ -341,6 +382,40 @@ app.get('/', (req, res) => {
 });
 
 // ------------------------------------------------------------
+// صفحة مرئية بسيطة لعرض كود QR (مفيدة للتشغيل المحلي بدون أدوات إضافية)
+// ------------------------------------------------------------
+app.get('/qr-page', checkApiKey, (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>ربط واتساب - Mrs Sally</title>
+<meta http-equiv="refresh" content="5">
+<style>
+  body { font-family: Tahoma, sans-serif; text-align:center; padding:40px; background:#f5f5f5; }
+  .box { background:#fff; display:inline-block; padding:30px; border-radius:12px; box-shadow:0 2px 10px rgba(0,0,0,.1); }
+  img { width:280px; height:280px; }
+  .status { margin-top:15px; font-size:18px; }
+  .ready { color:#25D366; font-weight:bold; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h2>ربط السيرفر بواتساب</h2>
+    ${isReady
+        ? '<p class="ready">✅ متصل وجاهز للإرسال</p>'
+        : latestQr
+            ? `<img src="${latestQr}" alt="QR Code"><p class="status">افتحي واتساب على موبايلك ← الأجهزة المرتبطة ← ربط جهاز، وامسحي الكود</p>`
+            : `<p class="status">جاري تجهيز كود QR... (الحالة: ${statusText})</p>`
+    }
+    <p style="color:#888;font-size:13px;">الصفحة بتتحدث لوحدها كل 5 ثواني</p>
+  </div>
+</body>
+</html>`);
+});
+
+// ------------------------------------------------------------
 // إشعارات Push
 // ------------------------------------------------------------
 
@@ -376,7 +451,8 @@ app.post('/send-push', checkApiKey, async (req, res) => {
 // ------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🌐 السيرفر شغال على البورت ${PORT}`);
+    console.log(`🌐 السيرفر شغال محليًا على: http://localhost:${PORT}`);
+    console.log(`📷 لعرض كود QR افتحي: http://localhost:${PORT}/qr-page`);
     console.log(`📁 مسار الجلسة: ${AUTH_PATH}`);
 });
 
